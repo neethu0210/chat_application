@@ -1,69 +1,50 @@
 -module(cc).
--export([start/1, stop/0, send_message/1, send_private_message/2, get_clients/0, loop/1]).
+-export([start/1, send_message/2, private_message/3, get_clients/1]).
 
-start(Username) ->
-    case cs:connect(Username, self()) of
-        {ok, "Connected"} ->
-            Pid = spawn(fun() -> loop(Username) end),
-            put(registered_client, Pid),  % Store client process in dictionary
-            io:format("Connected as ~s.~n", [Username]);
+start(Name) ->
+    case cs:connect(Name, self()) of
+        {ok, _Messages, _Topic} ->
+            io:format("Connected to the chat~n"),
+            Pid = spawn(fun() -> init(Name) end),
+            Pid;
+
         {error, Reason} ->
-            io:format("Connection failed: ~s~n", [Reason]),
-            exit(normal)
+            io:format("Failed to connect: ~s~n", [Reason]),
+            undefined % Return 'undefined' to indicate failure
     end.
 
-stop() ->
-    case get(registered_client) of
-        undefined -> io:format("Not connected.~n");
-        Pid ->
-            erase(registered_client), % Remove from dictionary
-            cs:disconnect(Pid),
-            Pid ! stop,
-            io:format("Disconnected.~n")
-    end.
+send_message(Pid, Msg) ->
+    Pid ! {send, Msg}.
 
-send_message(Message) ->
-    case get(registered_client) of
-        undefined -> io:format("[ERROR] Not connected.~n");
-        Pid -> Pid ! {send_message, Message}
-    end.
+private_message(Pid, Receiver, Msg) ->
+    Pid ! {private, Receiver, Msg}.
 
-send_private_message(ToUser, Message) ->
-    case get(registered_client) of
-        undefined -> 
-            io:format("[ERROR] Not connected.~n");
-        Pid -> 
-            Clients = cs:get_clients(),
-            case lists:member(ToUser, Clients) of
-                true -> Pid ! {send_private_message, ToUser, Message};
-                false -> io:format("[ERROR] User ~s is not connected.~n", [ToUser])
-            end
-    end.
+get_clients(Pid) ->
+    Pid ! list_clients.
 
-get_clients() ->
-    io:format("Connected users: ~p~n", [cs:get_clients()]).
-
-loop(Username) ->
+init(Name) ->
     receive
-        {send_message, Message} ->
-            cs:send_message(Username, Message),
-            loop(Username);
-        {send_private_message, ToUser, Message} ->
-            cs:send_private_message(Username, ToUser, Message),
-            loop(Username);
-        {new_message, Message} ->
-            io:format("[CHAT] ~s~n", [Message]),
-            loop(Username);
-        {private_message, PrivateMsg} ->
-            io:format("[PRIVATE] ~s~n", [PrivateMsg]),
-            loop(Username);
-        {chat_history, History} ->
-            io:format("[CHAT HISTORY]~n"),
-            lists:foreach(fun(M) -> io:format("~s~n", [M]) end, History),
-            loop(Username);
-        {error, Msg} ->
-            io:format("[ERROR] ~s~n", [Msg]),
-            loop(Username);
-        stop ->
-            io:format("Client ~s disconnected.~n", [Username])
+        {ok, Messages, Topic} ->
+            io:format("Connected to chat. Topic: ~s~n", [Topic]),
+            lists:foreach(fun({User, Msg, _}) -> io:format("~s: ~s~n", [User, Msg]) end, Messages),
+            loop(Name);
+
+        {error, Reason} ->
+            io:format("Failed to connect: ~s~n", [Reason]),
+            exit(normal);
+
+        _ -> init(Name)
     end.
+
+loop(Name) ->
+    receive
+        {broadcast, Msg} -> io:format("~s~n", [Msg]);
+        {private, From, Msg} -> io:format("Private from ~s: ~s~n", [From, Msg]);
+        {muted, Until} -> io:format("You are muted until ~p~n", [Until]);
+        {kicked, Reason} -> io:format("You were kicked: ~s~n", [Reason]), exit(normal);
+        {server_down} -> io:format("Server is shutting down~n"), exit(normal);
+        list_clients -> cs:list_clients();
+        {send, Msg} -> cs:send_message(Name, Msg);
+        {private, Receiver, Msg} -> cs:private_message(Name, Receiver, Msg)
+    end,
+    loop(Name).
