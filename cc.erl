@@ -6,16 +6,26 @@ start(Name) ->
 
 connect(Name) -> 
     case cs:connect(Name, self()) of
-        {ok, _, Topic} ->  
+        {ok, Messages, Topic} ->  
             io:format("[~s] Connected to the chat. Topic: ~s~n", [Name, Topic]),
-            Messages = cs:get_history(),
             lists:foreach(fun({Sender, Msg, Timestamp}) -> 
                 io:format("[~s] ~s: ~s~n", [Timestamp, Sender, Msg]) 
             end, Messages),
+
+            receive_offline_messages(Name),
             loop(Name);
         
         {error, Reason} -> 
             io:format("Failed to Connect: ~s~n", [Reason])
+    end.
+
+receive_offline_messages(Name) ->
+    receive
+        {private, Sender, Message} ->
+            io:format("[~s] ~s: ~s~n", [Name, Sender, Message]),
+            receive_offline_messages(Name)
+    after 500 ->
+        ok
     end.
 
 disconnect(ClientName) ->
@@ -33,7 +43,7 @@ send_message(Name, Message) ->
 send_private_message(Sender, Receiver, Message) ->
     case cs:private_message(Sender, Receiver, Message) of
         ok -> io:format("Private message sent to ~s.~n", [Receiver]);
-        {offline, StoredMsg} -> io:format("User ~s is offline.~n", [Receiver]);
+        {offline, _} -> io:format("User ~s is offline.~n", [Receiver]);
         {error, Reason} -> io:format("Failed to send private message: ~s~n", [Reason])
     end.
 
