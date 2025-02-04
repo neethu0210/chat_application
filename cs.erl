@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start/2, stop/0, connect/2, send_message/2, list_clients/0, private_message/3, 
-         set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2]).
+         set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2, disconnect/1, get_history/0]).
 
 -export([init/1, handle_call/3, handle_cast/2, terminate/2, handle_info/2]).
 
@@ -56,11 +56,24 @@ get_admins() ->
 promote_admin(AdminName, ClientName) ->
     gen_server:call(?MODULE, {promote_admin, AdminName, ClientName}).
 
+disconnect(ClientName) ->
+    gen_server:cast(?MODULE, {disconnect, ClientName}).
+
+get_history() ->
+    gen_server:call(?MODULE, get_history).
+
 init([MaxClients, MaxMessages]) ->
     {ok, #state{max_clients = MaxClients, max_messages = MaxMessages}}.
 
 handle_call(list_clients, _From, State) ->
     {reply, maps:keys(State#state.clients), State};
+
+handle_call(get_history, _From, State) ->
+    FormattedMessages = lists:map(fun({Sender, Msg, Timestamp}) ->
+        HumanReadableTime = calendar:system_time_to_rfc3339(Timestamp div 1000000, [{unit, millisecond}]),
+        {Sender, Msg, HumanReadableTime}
+    end, State#state.messages),
+    {reply, lists:reverse(FormattedMessages), State};
 
 handle_call({message, ClientName, Message}, _From, State) ->
     CurrentTime = erlang:system_time(),
@@ -73,7 +86,16 @@ handle_call({message, ClientName, Message}, _From, State) ->
                     Timestamp = CurrentTime,
                     UpdatedMessages = [{ClientName, Message, Timestamp} | State#state.messages],
                     TrimmedMessages = lists:sublist(UpdatedMessages, min(length(UpdatedMessages), State#state.max_messages)),
-                    broadcast(State, io_lib:format("~s: ~s", [ClientName, Message])),
+                    maps:foreach(
+                        fun(Receiver, ReceiverPid) ->
+                            if Receiver /= ClientName ->
+                                ReceiverPid ! {broadcast, io_lib:format("[~s] ~s: ~s", [Receiver, ClientName, Message])};
+                            true -> ok
+                            end
+                        end,
+                        State#state.clients
+                    ),
+
                     {reply, ok, State#state{messages = TrimmedMessages}};
                 error ->
                     {reply, {error, "Client not found"}, State}
@@ -83,10 +105,16 @@ handle_call({message, ClientName, Message}, _From, State) ->
 handle_call({private_message, Sender, Receiver, Message}, _From, State) ->
     case maps:find(Receiver, State#state.clients) of
         {ok, Pid} ->
-            Pid ! {private, Sender, Message},
+            Pid ! {broadcast, io_lib:format("[~s] ~s: ~s", [Receiver, Sender, Message])},
             {reply, ok, State};
         error ->
-            NewOfflineMessages = maps:update_with(Receiver, fun(Msgs) -> [{Sender, Message, erlang:system_time()} | Msgs] end, [{Sender, Message, erlang:system_time()}], State#state.offline_messages),
+            NewOfflineMessages =
+                case maps:find(Receiver, State#state.offline_messages) of
+                    {ok, Msgs} ->
+                        maps:put(Receiver, [{Sender, Message, erlang:system_time()} | Msgs], State#state.offline_messages);
+                    error ->
+                        maps:put(Receiver, [{Sender, Message, erlang:system_time()}], State#state.offline_messages)
+                end,
             SenderPid = maps:get(Sender, State#state.clients, undefined),
             case SenderPid of
                 undefined -> ok;
@@ -103,7 +131,15 @@ handle_call({connect, ClientName, Pid}, _From, State) ->
         false ->
             UpdatedClients = maps:put(ClientName, Pid, State#state.clients),
             NewState = State#state{clients = UpdatedClients},
-            broadcast(State, io_lib:format("~s has joined the chat", [ClientName])),
+            maps:foreach(
+                        fun(Receiver, ReceiverPid) ->
+                            if Receiver /= ClientName ->
+                                ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has joined the chat",[Receiver, ClientName])};
+                            true -> ok
+                            end
+                        end,
+                        State#state.clients
+                    ),
             MessagesToSend = lists:sublist(State#state.messages, min(length(State#state.messages), State#state.max_messages)),
             NewStateAfterAdminCheck = 
                 case map_size(State#state.clients) of
@@ -126,7 +162,15 @@ handle_call(get_topic, _From, State) ->
 handle_call({set_topic, ClientName, Topic}, _From, State) ->
     case maps:get(ClientName, State#state.admins, false) of
         true ->
-            broadcast(State, io_lib:format("Topic changed to: ~s", [Topic])),
+            maps:foreach(
+                fun(Receiver, ReceiverPid) ->
+                    if Receiver /= ClientName ->
+                        ReceiverPid ! {broadcast, io_lib:format("[~s] Topic changed to: ~s by ~s", [Receiver, Topic, ClientName])};
+                    true -> ok
+                    end
+                end,
+                State#state.clients
+            ),
             {reply, ok, State#state{topic = Topic}};
         false ->
             {reply, {error, "Only admins can change topic"}, State}
@@ -152,7 +196,15 @@ handle_call({kick, AdminName, ClientName}, _From, State) ->
             case maps:find(ClientName, State#state.clients) of
                 {ok, _} ->
                     NewClients = maps:remove(ClientName, State#state.clients),
-                    broadcast(State, io_lib:format("~s has been kicked by ~s", [ClientName, AdminName])),
+                    maps:foreach(
+                        fun(Receiver, ReceiverPid) ->
+                            if Receiver /= AdminName andalso Receiver /= ClientName ->
+                                ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has been kicked by ~s", [Receiver, ClientName, AdminName])};
+                            true -> ok
+                            end
+                        end,
+                        State#state.clients
+                    ),
                     {reply, ok, State#state{clients = NewClients}};
                 error -> {reply, {error, "User not found"}, State}
             end;
@@ -181,6 +233,24 @@ handle_call(get_admins, _From, State) ->
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
+
+handle_cast({disconnect, ClientName}, State) ->
+    case maps:find(ClientName, State#state.clients) of
+        {ok, _} ->
+            NewClients = maps:remove(ClientName, State#state.clients),
+            maps:foreach(
+                fun(Receiver, ReceiverPid) ->
+                    if Receiver /= ClientName ->
+                        ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has left the chat", [Receiver, ClientName])};
+                    true -> ok
+                    end
+                end,
+                State#state.clients
+            ),
+            {noreply, State#state{clients = NewClients}}; %% <-- Fixed return value
+        error ->
+            {noreply, State}
+    end;
 
 handle_cast(_, State) -> {noreply, State}.
 
