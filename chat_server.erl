@@ -1,8 +1,8 @@
--module(cs).
+-module(chat_server).
 -behaviour(gen_server).
 
 -export([start/2, stop/0, connect/2, send_message/2, list_clients/0, private_message/3, 
-         set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2, disconnect/1, get_history/0]).
+         set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2, disconnect/1, get_history/0, set_topic_restriction/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, terminate/2, handle_info/2]).
 
@@ -10,11 +10,12 @@
     clients = #{},            % {Username => Pid}
     messages = [],            % [{Sender, Message, Timestamp}]
     max_clients,              % Maximum allowed clients
-    topic = "Welcome!",       % Chat topic
-    admins = #{"admin" => true}, % Admin users
+    topic = "",               % Chat topic
+    admins = #{}, % Admin users
     muted_users = #{},        % {Username => UnmuteTime}
     offline_messages = #{},   % {Receiver => [{Sender, Message, Timestamp}]}
-    max_messages              % Maximum number of messages to send to new clients
+    max_messages,             % Maximum number of messages to send to new clients
+    admin_only_topic = false  % Restricts topic changes to admins only
 }).
 
 start(MaxClients, MaxMessages) ->
@@ -57,10 +58,13 @@ promote_admin(AdminName, ClientName) ->
     gen_server:call(?MODULE, {promote_admin, AdminName, ClientName}).
 
 disconnect(ClientName) ->
-    gen_server:cast(?MODULE, {disconnect, ClientName}).
+    gen_server:call(?MODULE, {disconnect, ClientName}).
 
 get_history() ->
     gen_server:call(?MODULE, get_history).
+
+set_topic_restriction(AdminName, Restriction) ->
+    gen_server:call(?MODULE, {set_topic_restriction, AdminName, Restriction}).
 
 init([MaxClients, MaxMessages]) ->
     {ok, #state{max_clients = MaxClients, max_messages = MaxMessages}}.
@@ -79,7 +83,12 @@ handle_call({message, ClientName, Message}, _From, State) ->
     CurrentTime = erlang:system_time(),
     case maps:find(ClientName, State#state.muted_users) of
         {ok, UnmuteTime} when CurrentTime < UnmuteTime ->
-            {reply, {error, "You are muted"}, State};
+            RemainingTime = (UnmuteTime - CurrentTime) div 1_000_000_000,
+            Hours = RemainingTime div 3600,
+            Minutes = (RemainingTime rem 3600) div 60,
+            Seconds = RemainingTime rem 60,
+            TimeString = io_lib:format("~2..0B:~2..0B:~2..0B", [Hours, Minutes, Seconds]),
+            {reply, {error, io_lib:format("You are muted. Time remaining: ~s", [TimeString])}, State};
         _ ->
             case maps:find(ClientName, State#state.clients) of
                 {ok, _Pid} ->
@@ -160,20 +169,22 @@ handle_call(get_topic, _From, State) ->
     {reply, {ok, State#state.topic}, State};
 
 handle_call({set_topic, ClientName, Topic}, _From, State) ->
-    case maps:get(ClientName, State#state.admins, false) of
-        true ->
-            maps:foreach(
-                fun(Receiver, ReceiverPid) ->
-                    if Receiver /= ClientName ->
-                        ReceiverPid ! {broadcast, io_lib:format("[~s] Topic changed to: ~s by ~s", [Receiver, Topic, ClientName])};
-                    true -> ok
-                    end
-                end,
-                State#state.clients
-            ),
-            {reply, ok, State#state{topic = Topic}};
-        false ->
-            {reply, {error, "Only admins can change topic"}, State}
+    case State#state.admin_only_topic of
+        true -> 
+            case maps:get(ClientName, State#state.admins, false) of
+                true -> update_topic(State, ClientName, Topic);
+                false -> {reply, {error, "Only admins can change the topic"}, State}
+            end;
+        false -> 
+            update_topic(State, ClientName, Topic)
+    end;
+
+handle_call({set_topic_restriction, AdminName, Restriction}, _From, State) ->
+    case maps:get(AdminName, State#state.admins, false) of
+        true -> 
+            {reply, ok, State#state{admin_only_topic = Restriction}};
+        false -> 
+            {reply, {error, "Only admins can change topic restrictions"}, State}
     end;
 
 handle_call({promote_admin, AdminName, ClientName}, _From, State) ->
@@ -232,12 +243,13 @@ handle_call(get_admins, _From, State) ->
     {reply, maps:keys(State#state.admins), State};
 
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State}.
+    {stop, normal, ok, State};
 
-handle_cast({disconnect, ClientName}, State) ->
+handle_call({disconnect, ClientName}, _From, State) ->
     case maps:find(ClientName, State#state.clients) of
         {ok, _} ->
             NewClients = maps:remove(ClientName, State#state.clients),
+            NewAdmins = maps:remove(ClientName, State#state.admins),
             maps:foreach(
                 fun(Receiver, ReceiverPid) ->
                     if Receiver /= ClientName ->
@@ -247,10 +259,41 @@ handle_cast({disconnect, ClientName}, State) ->
                 end,
                 State#state.clients
             ),
-            {noreply, State#state{clients = NewClients}}; %% <-- Fixed return value
+            case maps:keys(NewAdmins) of
+                [] ->
+                    case maps:keys(NewClients) of
+                        [NextAdmin | _] -> 
+                            NewAdminsUpdated = maps:put(NextAdmin, true, NewAdmins),
+                            maps:foreach(
+                                fun(Receiver, ReceiverPid) ->
+                                    if Receiver /= NextAdmin ->
+                                        ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has been promoted to admin", [Receiver, NextAdmin])};
+                                    true -> 
+                                        ReceiverPid ! {broadcast, io_lib:format("[~s] You have been promoted to admin", [Receiver])}
+                                    end
+                                end,
+                                NewClients
+                            ),
+                            {reply, ok, State#state{clients = NewClients, admins = NewAdminsUpdated}};
+                        [] -> {reply, ok, State#state{clients = NewClients, admins = NewAdmins}}
+                    end;
+                _ -> {reply, ok, State#state{clients = NewClients, admins = NewAdmins}}
+            end;
         error ->
-            {noreply, State}
-    end;
+            {reply, {error, "Client Not Found"}, State}
+    end.
+
+update_topic(State, ClientName, Topic) ->
+    maps:foreach(
+        fun(Receiver, ReceiverPid) ->
+            if Receiver /= ClientName ->
+                ReceiverPid ! {broadcast, io_lib:format("[~s] Topic changed to: ~s by ~s", [Receiver, Topic, ClientName])};
+            true -> ok
+            end
+        end,
+        State#state.clients
+    ),
+    {reply, ok, State#state{topic = Topic}}.
 
 handle_cast(_, State) -> {noreply, State}.
 
