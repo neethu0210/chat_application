@@ -1,4 +1,4 @@
--module(cc).
+-module(chat_client).
 -export([start/1, connect/1, send_message/2, send_private_message/3, get_history/0, loop/1, set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2, disconnect/1, list_clients/0, set_topic_restriction/1]).
 
 start(Name) ->
