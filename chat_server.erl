@@ -11,7 +11,7 @@
     messages = [],            % [{Sender, Message, Timestamp}]
     max_clients,              % Maximum allowed clients
     topic = "",               % Chat topic
-    admins = #{}, % Admin users
+    admins = #{},             % Admin users
     muted_users = #{},        % {Username => UnmuteTime}
     offline_messages = #{},   % {Receiver => [{Sender, Message, Timestamp}]}
     max_messages,             % Maximum number of messages to send to new clients
