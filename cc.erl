@@ -1,4 +1,4 @@
--module(chat_client).
+-module(cc).
 -export([start/1, connect/1, send_message/2, send_private_message/3, get_history/0, loop/1, set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2, disconnect/1, list_clients/0, set_topic_restriction/1]).
 
 start(Name) ->
@@ -11,7 +11,8 @@ connect(Name) ->
             true -> io:format("[~s] Connected to the chat. Topic: ~s~n", [Name, Topic])
             end,
             lists:foreach(fun({Sender, Msg, Timestamp}) -> 
-                io:format("[~p] ~p: ~p~n", [Timestamp, Sender, Msg]) 
+                HumanReadableTime = calendar:system_time_to_rfc3339(Timestamp div 1000000, [{unit, millisecond}]),
+                io:format("[~p] ~p: ~p~n", [HumanReadableTime, Sender, Msg]) 
             end, Messages),
 
             receive_offline_messages(Name),
@@ -51,8 +52,8 @@ send_private_message(Sender, Receiver, Message) ->
 
 get_history() ->
     Messages = cs:get_history(),
-    lists:foreach(fun({Sender, Msg, _}) -> 
-        io:format("~s: ~s~n", [Sender, Msg]) 
+    lists:foreach(fun({Sender, Msg, Timestamp}) -> 
+        io:format("[~p] ~p: ~p~n", [Timestamp, Sender, Msg]) 
     end, Messages).
 
 get_admins() ->

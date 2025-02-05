@@ -1,4 +1,4 @@
--module(chat_server).
+-module(cs).
 -behaviour(gen_server).
 
 -export([start/2, stop/0, connect/2, send_message/2, list_clients/0, private_message/3, 
