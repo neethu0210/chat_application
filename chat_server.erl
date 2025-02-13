@@ -1,305 +1,402 @@
 -module(chat_server).
--behaviour(gen_server).
+-export([start/3, get_history/1, get_connected_clients/1, send_message_to_all_clients/2, make_admin/2]).
 
--export([start/2, stop/0, connect/2, send_message/2, list_clients/0, private_message/3, 
-         set_topic/2, get_topic/0, kick/2, mute/3, unmute/2, get_admins/0, promote_admin/2, disconnect/1, get_history/0, set_topic_restriction/2]).
+start(ServerName, MaxClients, MaxHistoryCount) ->
+  Clients = #{},
+  MsgHistory = [],
+  Topic = "",
+  AdminOnlyTopic = false,
+  ServerPid = spawn(fun() -> loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) end),
+  io:format("Server Started with PID ~p~n",[ServerPid]),
+  global:register_name(ServerName,ServerPid).
 
--export([init/1, handle_call/3, handle_cast/2, terminate/2, handle_info/2]).
+loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    receive
+        {ClientName, ClientPid, connect_client} ->
+            connect(ClientName, ClientPid, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
--record(state, {
-    clients = #{},            % {Username => Pid}
-    messages = [],            % [{Sender, Message, Timestamp}]
-    max_clients,              % Maximum allowed clients
-    topic = "",               % Chat topic
-    admins = #{},             % Admin users
-    muted_users = #{},        % {Username => UnmuteTime}
-    offline_messages = #{},   % {Receiver => [{Sender, Message, Timestamp}]}
-    max_messages,             % Maximum number of messages to send to new clients
-    admin_only_topic = false  % Restricts topic changes to admins only
-}).
+        {ClientName, Message, send_message} ->
+            send_msg_client(ClientName, Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-start(MaxClients, MaxMessages) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [MaxClients, MaxMessages], []).
+        {Sender, Receiver, Message, send_private_message} ->
+            send_private_msg_client(Sender, Receiver, Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-stop() ->
-    gen_server:call(?MODULE, stop).
+        {get_connected_clients} ->
+            connected_clients(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-connect(ClientName, Pid) ->
-    gen_server:call(?MODULE, {connect, ClientName, Pid}).
+        {ClientName, get_connected_clients_client} ->
+            connected_clients_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-send_message(ClientName, Message) ->
-    gen_server:call(?MODULE, {message, ClientName, Message}).
+        {history} ->
+            msg_history(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-list_clients() ->
-    gen_server:call(?MODULE, list_clients).
+        {ClientName, history_client} ->
+            msg_history_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-private_message(Sender, Receiver, Message) ->
-    gen_server:call(?MODULE, {private_message, Sender, Receiver, Message}).
+        {ClientName, EnableAdminOnly, updt_admin_only_topic} ->
+            update_admin_only_topic(ClientName, EnableAdminOnly, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-set_topic(ClientName, Topic) ->
-    gen_server:call(?MODULE, {set_topic, ClientName, Topic}).
+        {ClientName, NewTopic, update_topic} ->
+            update_topic_client(ClientName, NewTopic, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-get_topic() ->
-    gen_server:call(?MODULE, get_topic).
+        {ClientName, get_current_topic} ->
+            get_topic_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-kick(AdminName, ClientName) ->
-    gen_server:call(?MODULE, {kick, AdminName, ClientName}).
+        {Message, send_message_to_all_clients} ->
+            send_msg_server_to_all(Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-mute(AdminName, ClientName, Time) ->
-    gen_server:call(?MODULE, {mute, AdminName, ClientName, Time}).
+        {Message, ClientName, send_message_to_all_clients_except_given} -> 
+            send_msg_server_to_all_except_given(Message, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-unmute(AdminName, ClientName) ->
-    gen_server:call(?MODULE, {unmute, AdminName, ClientName}).
+        {ClientName, make_admin_server} ->
+            make_admin_server(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-get_admins() ->
-    gen_server:call(?MODULE, get_admins).
+        {ClientName, get_admins} ->
+            get_admins_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-promote_admin(AdminName, ClientName) ->
-    gen_server:call(?MODULE, {promote_admin, AdminName, ClientName}).
+        {ClientName, Status, update_status} ->
+            update_client_status(ClientName, Status, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-disconnect(ClientName) ->
-    gen_server:call(?MODULE, {disconnect, ClientName}).
+        {AdminName, ClientName, kick_client} ->
+            kick(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-get_history() ->
-    gen_server:call(?MODULE, get_history).
+        {AdminName, ClientName, Time, mute_client} ->
+            mute(AdminName, ClientName, Time, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-set_topic_restriction(AdminName, Restriction) ->
-    gen_server:call(?MODULE, {set_topic_restriction, AdminName, Restriction}).
+        {AdminName, ClientName, unmute_client} ->
+            unmute(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
 
-init([MaxClients, MaxMessages]) ->
-    {ok, #state{max_clients = MaxClients, max_messages = MaxMessages}}.
-
-handle_call(list_clients, _From, State) ->
-    {reply, maps:keys(State#state.clients), State};
-
-handle_call(get_history, _From, State) ->
-    FormattedMessages = lists:map(fun({Sender, Msg, Timestamp}) ->
-        HumanReadableTime = calendar:system_time_to_rfc3339(Timestamp div 1000000, [{unit, millisecond}]),
-        {Sender, Msg, HumanReadableTime}
-    end, State#state.messages),
-    {reply, lists:reverse(FormattedMessages), State};
-
-handle_call({message, ClientName, Message}, _From, State) ->
-    CurrentTime = erlang:system_time(),
-    case maps:find(ClientName, State#state.muted_users) of
-        {ok, UnmuteTime} when CurrentTime < UnmuteTime ->
-            RemainingTime = (UnmuteTime - CurrentTime) div 1_000_000_000,
-            Hours = RemainingTime div 3600,
-            Minutes = (RemainingTime rem 3600) div 60,
-            Seconds = RemainingTime rem 60,
-            TimeString = io_lib:format("~2..0B:~2..0B:~2..0B", [Hours, Minutes, Seconds]),
-            {reply, {error, io_lib:format("You are muted. Time remaining: ~s", [TimeString])}, State};
-        _ ->
-            case maps:find(ClientName, State#state.clients) of
-                {ok, _Pid} ->
-                    Timestamp = CurrentTime,
-                    UpdatedMessages = [{ClientName, Message, Timestamp} | State#state.messages],
-                    TrimmedMessages = lists:sublist(UpdatedMessages, min(length(UpdatedMessages), State#state.max_messages)),
-                    maps:foreach(
-                        fun(Receiver, ReceiverPid) ->
-                            if Receiver /= ClientName ->
-                                ReceiverPid ! {broadcast, io_lib:format("[~s] ~s: ~s", [Receiver, ClientName, Message])};
-                            true -> ok
-                            end
-                        end,
-                        State#state.clients
-                    ),
-
-                    {reply, ok, State#state{messages = TrimmedMessages}};
-                error ->
-                    {reply, {error, "Client not found"}, State}
-            end
-    end;
-
-handle_call({private_message, Sender, Receiver, Message}, _From, State) ->
-    case maps:find(Receiver, State#state.clients) of
-        {ok, Pid} ->
-            Pid ! {broadcast, io_lib:format("[~s] ~s: ~s", [Receiver, Sender, Message])},
-            {reply, ok, State};
-        error ->
-            NewOfflineMessages =
-                case maps:find(Receiver, State#state.offline_messages) of
-                    {ok, Msgs} ->
-                        maps:put(Receiver, [{Sender, Message, erlang:system_time()} | Msgs], State#state.offline_messages);
-                    error ->
-                        maps:put(Receiver, [{Sender, Message, erlang:system_time()}], State#state.offline_messages)
-                end,
-            SenderPid = maps:get(Sender, State#state.clients, undefined),
-            case SenderPid of
-                undefined -> ok;
-                _ -> SenderPid ! {offline_message, Receiver, "Message will be delivered when they connect."}
-            end,
-            {reply, {offline, Receiver}, State#state{offline_messages = NewOfflineMessages}}
-    end;
-
-handle_call({connect, ClientName, Pid}, _From, State) ->
-    case maps:is_key(ClientName, State#state.clients) of
-        true -> {reply, {error, "Username already taken"}, State};
-        false when map_size(State#state.clients) >= State#state.max_clients ->
-            {reply, {error, "Server is full"}, State};
-        false ->
-            UpdatedClients = maps:put(ClientName, Pid, State#state.clients),
-            NewState = State#state{clients = UpdatedClients},
-            maps:foreach(
-                        fun(Receiver, ReceiverPid) ->
-                            if Receiver /= ClientName ->
-                                ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has joined the chat",[Receiver, ClientName])};
-                            true -> ok
-                            end
-                        end,
-                        State#state.clients
-                    ),
-            MessagesToSend = lists:sublist(State#state.messages, min(length(State#state.messages), State#state.max_messages)),
-            NewStateAfterAdminCheck = 
-                case map_size(State#state.clients) of
-                    0 -> NewState#state{admins = maps:put(ClientName, true, NewState#state.admins)};
-                    _ -> NewState
-                end,
-            case maps:find(ClientName, State#state.offline_messages) of
-                {ok, Messages} ->
-                    lists:foreach(fun({Sender, Msg, _}) -> Pid ! {private, Sender, Msg} end, Messages),
-                    NewOfflineMessages = maps:remove(ClientName, State#state.offline_messages),
-                    {reply, {ok, MessagesToSend, State#state.topic}, NewStateAfterAdminCheck#state{offline_messages = NewOfflineMessages}};
-                error ->
-                    {reply, {ok, MessagesToSend, State#state.topic}, NewStateAfterAdminCheck}
-            end
-    end;
-
-handle_call(get_topic, _From, State) ->
-    {reply, {ok, State#state.topic}, State};
-
-handle_call({set_topic, ClientName, Topic}, _From, State) ->
-    case State#state.admin_only_topic of
-        true -> 
-            case maps:get(ClientName, State#state.admins, false) of
-                true -> update_topic(State, ClientName, Topic);
-                false -> {reply, {error, "Only admins can change the topic"}, State}
-            end;
-        false -> 
-            update_topic(State, ClientName, Topic)
-    end;
-
-handle_call({set_topic_restriction, AdminName, Restriction}, _From, State) ->
-    case maps:get(AdminName, State#state.admins, false) of
-        true -> 
-            {reply, ok, State#state{admin_only_topic = Restriction}};
-        false -> 
-            {reply, {error, "Only admins can change topic restrictions"}, State}
-    end;
-
-handle_call({promote_admin, AdminName, ClientName}, _From, State) ->
-    case maps:get(AdminName, State#state.admins, false) of
-        true ->
-            case maps:get(ClientName, State#state.admins, false) of
-                true -> {reply, {error, "User is already an admin"}, State};
-                false ->
-                    case maps:get(ClientName, State#state.clients, undefined) of
-                        undefined -> {reply, {error, "User not found"}, State};
-                        _ -> {reply, ok, State#state{admins = maps:put(ClientName, true, State#state.admins)}}
-                    end
-            end;
-        false -> {reply, {error, "Only admins can promote users as admins"}, State}
-    end;
-
-handle_call({kick, AdminName, ClientName}, _From, State) ->
-    case maps:get(AdminName, State#state.admins, false) of
-        true ->
-            case maps:find(ClientName, State#state.clients) of
-                {ok, _} ->
-                    NewClients = maps:remove(ClientName, State#state.clients),
-                    maps:foreach(
-                        fun(Receiver, ReceiverPid) ->
-                            if Receiver /= AdminName andalso Receiver /= ClientName ->
-                                ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has been kicked by ~s", [Receiver, ClientName, AdminName])};
-                            true -> ok
-                            end
-                        end,
-                        State#state.clients
-                    ),
-                    {reply, ok, State#state{clients = NewClients}};
-                error -> {reply, {error, "User not found"}, State}
-            end;
-        false -> {reply, {error, "Only admins can kick users"}, State}
-    end;
-
-handle_call({mute, AdminName, ClientName, Time}, _From, State) ->
-    case maps:get(AdminName, State#state.admins, false) of
-        true ->
-            UnmuteTime = erlang:system_time() + Time,
-            NewMutedUsers = maps:put(ClientName, UnmuteTime, State#state.muted_users),
-            {reply, ok, State#state{muted_users = NewMutedUsers}};
-        false -> {reply, {error, "Only admins can mute users"}, State}
-    end;
-
-handle_call({unmute, AdminName, ClientName}, _From, State) ->
-    case maps:get(AdminName, State#state.admins, false) of
-        true ->
-            NewMutedUsers = maps:remove(ClientName, State#state.muted_users),
-            {reply, ok, State#state{muted_users = NewMutedUsers}};
-        false -> {reply, {error, "Only admins can unmute users"}, State}
-    end;
-
-handle_call(get_admins, _From, State) ->
-    {reply, maps:keys(State#state.admins), State};
-
-handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
-
-handle_call({disconnect, ClientName}, _From, State) ->
-    case maps:find(ClientName, State#state.clients) of
-        {ok, _} ->
-            NewClients = maps:remove(ClientName, State#state.clients),
-            NewAdmins = maps:remove(ClientName, State#state.admins),
-            maps:foreach(
-                fun(Receiver, ReceiverPid) ->
-                    if Receiver /= ClientName ->
-                        ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has left the chat", [Receiver, ClientName])};
-                    true -> ok
-                    end
-                end,
-                State#state.clients
-            ),
-            case maps:keys(NewAdmins) of
-                [] ->
-                    case maps:keys(NewClients) of
-                        [NextAdmin | _] -> 
-                            NewAdminsUpdated = maps:put(NextAdmin, true, NewAdmins),
-                            maps:foreach(
-                                fun(Receiver, ReceiverPid) ->
-                                    if Receiver /= NextAdmin ->
-                                        ReceiverPid ! {broadcast, io_lib:format("[~s] ~s has been promoted to admin", [Receiver, NextAdmin])};
-                                    true -> 
-                                        ReceiverPid ! {broadcast, io_lib:format("[~s] You have been promoted to admin", [Receiver])}
-                                    end
-                                end,
-                                NewClients
-                            ),
-                            {reply, ok, State#state{clients = NewClients, admins = NewAdminsUpdated}};
-                        [] -> {reply, ok, State#state{clients = NewClients, admins = NewAdmins}}
-                    end;
-                _ -> {reply, ok, State#state{clients = NewClients, admins = NewAdmins}}
-            end;
-        error ->
-            {reply, {error, "Client Not Found"}, State}
+        {AdminName, ClientName, make_admin_client} ->
+            make_admin_client(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+            
+        {ClientName, disconnect_client} ->
+            disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
-update_topic(State, ClientName, Topic) ->
-    maps:foreach(
-        fun(Receiver, ReceiverPid) ->
-            if Receiver /= ClientName ->
-                ReceiverPid ! {broadcast, io_lib:format("[~s] Topic changed to: ~s by ~s", [Receiver, Topic, ClientName])};
-            true -> ok
-            end
+connect(ClientName, ClientPid, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    CurrentClients = map_size(Clients),
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsClient == true ->
+        global:send(ClientName,{ServerName, "Client Name already been used. Cannot Establish Connection to the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+    true -> 
+        if CurrentClients >= MaxClients ->
+            global:send(ClientName,{ServerName, "Client Limit Exceeded. Cannot Establish Connection to the ", connection_failed}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true ->
+            Client = #{clientPid => ClientPid, isAdmin => false, isMuted => false, mutedTill => 0, status => online, personalHistory => []},
+            Temp = maps:put(ClientName, Client, Clients),
+            io:format("\n[" ++ get_time() ++ "] New Client Added To Group:~p~n", [ClientName]),
+            Message = "New Client Added To Group: " ++ atom_to_list(ClientName),
+            global:send(ServerName, {Message, ClientName, send_message_to_all_clients_except_given}),  
+            global:send(ClientName,{ServerName, MsgHistory, MaxHistoryCount, latest_n_history}),          
+            loop(ServerName, Temp, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+        end
+    end.
+
+send_msg_client(ClientName, Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients), 
+    Msg = "[" ++ atom_to_list(ClientName) ++ "]: " ++ Message, 
+    if IsClient == true ->
+        Client = maps:get(ClientName, Clients),
+        IsMutedClient = maps:get(isMuted, Client),
+        if IsMutedClient == true-> 
+            MuteEndTime = maps:get(mutedTill, Client),
+            CurrentTime = calendar:local_time(),
+            if CurrentTime >= MuteEndTime ->
+                TempClient = maps:put(isMuted, false, Client),
+                TempMap = maps:put(ClientName, TempClient, Clients),
+                io:format("\n[" ++ get_time() ++ "] ~p: ~p~n", [ClientName, Message]),
+                History = {"[" ++ get_time() ++ "]", ClientName, Message},
+                TempHistory = lists:append(MsgHistory, [History]),
+                global:send(ServerName, {Msg, ClientName, send_message_to_all_clients_except_given}),  
+                loop(ServerName, TempMap, MaxClients, MaxHistoryCount, TempHistory, Topic, AdminOnlyTopic);
+            true ->
+                {{Year,Month,Day},{Hour,Min,Sec}} = MuteEndTime,
+                MuteTime = lists:concat([Year,'/',Month,'/',Day,' ',Hour,':',Min,':',Sec]),
+                global:send(ClientName,{ServerName, "You are Muted until "++ MuteTime ++ " Cannot Send Message to the ", connection_failed}),
+                loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+            end;
+        true ->
+            io:format("\n[" ++ get_time() ++ "] ~p: ~p~n", [ClientName, Message]),
+            History = {"[" ++ get_time() ++ "]", ClientName, Message},
+            TempHistory = lists:append(MsgHistory, [History]),
+            global:send(ServerName, {Msg, ClientName, send_message_to_all_clients_except_given}),  
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, TempHistory, Topic, AdminOnlyTopic)
+        end;
+    true -> ok
+    end.
+
+send_private_msg_client(Sender, Receiver, Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClientSender = maps:is_key(Sender, Clients),
+    IsClientReceiver = maps:is_key(Receiver, Clients),
+    if IsClientSender == true andalso IsClientReceiver ->
+        Client = maps:get(Receiver, Clients),
+        ReceiverStatus = maps:get(status, Client),
+        if ReceiverStatus == offline ->
+            PersonalHistory = maps:get(personalHistory, Client),
+            CurrentMsg = {"[" ++ get_time() ++ "]", Sender, Message},
+            TempPersonalHistory = lists:append(PersonalHistory, [CurrentMsg]),
+            TempClient = maps:put(personalHistory, TempPersonalHistory, Client),
+            TempMap = maps:put(Receiver, TempClient, Clients),
+            global:send(Sender, {Sender, Receiver, offline_message}),
+            loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true ->
+            global:send(Receiver, {Sender, Receiver, Message, private_message}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+        end;
+    true ->
+        global:send(Sender, {Receiver, "Client Name not found. Cannot Send Message to Client ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
+
+connected_clients(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    ClientsList = maps:keys(Clients),
+    io:format("\n[" ++ get_time() ++ "] Clients Connected to Server :~p~n", [ClientsList]),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+connected_clients_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    ClientsList = maps:keys(Clients),
+    global:send(ClientName, {ServerName, ClientsList, connected_clients}),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+msg_history(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    DisplayHistory = lists:reverse(MsgHistory),
+    io:format("\n[" ++ get_time() ++ "]"),
+    io:format("Chat Message History :~n"),
+    lists:foreach(fun({Time, From, Message}) ->
+    io:format("~p ~p: ~p~n",[Time, From, Message]) end, DisplayHistory),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+msg_history_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsClient == true ->
+        global:send(ClientName, {ServerName, MsgHistory, full_history}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+    true -> ok
+    end.
+
+update_admin_only_topic(ClientName, EnableAdminOnly, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsClient == true ->
+        Client = maps:get(ClientName, Clients),
+        IsAdmin = maps:get(isAdmin, Client),
+        if IsAdmin == true ->
+             NewAdminOnlyTopic = EnableAdminOnly,
+             io:format("\n[" ++ get_time() ++ "] "),
+             if EnableAdminOnly == true ->
+                io:format("Admin-only topic change enabled by ~p~n", [ClientName]);
+            true ->
+                io:format("Admin-only topic change disabled by ~p~n", [ClientName])
+            end,
+            Message = "Admin-only topic change is now " ++ (if EnableAdminOnly == true -> "enabled"; true -> "disabled" end) ++ " by " ++ atom_to_list(ClientName),
+            global:send(ServerName, {Message, send_message_to_all_clients}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, NewAdminOnlyTopic);
+            true ->
+                global:send(ClientName, {ServerName, "You are Not Admin. Only admins can change the admin-only topic setting of the .", connection_failed}),
+                loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+            end;
+        true -> ok
+    end.
+
+update_topic_client(ClientName, NewTopic, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients), 
+    if IsClient == true ->
+        Client = maps:get(ClientName, Clients),
+        if AdminOnlyTopic == true ->
+            IsAdmin = maps:get(isAdmin, Client),
+            if IsAdmin == true ->
+                io:format("\n[" ++ get_time() ++ "] "),
+                io:format("~p Updated the Chat Room Topic changed to ~p~n",[ClientName, NewTopic]),
+                Message = "Chat Room Topic to " ++ NewTopic,
+                global:send(ServerName,{Message, send_message_to_all_clients}),
+                loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, NewTopic, AdminOnlyTopic);
+            true ->
+                global:send(ClientName, {ServerName, "You are Not Admin. Only Admin Can Change the Topic. Failed to change the Topic of the ", connection_failed}),
+                loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+            end;
+        true ->
+            io:format("\n[" ++ get_time() ++ "] "),
+            io:format("~p Updated the Chat Room Topic to ~p~n",[ClientName, NewTopic]),
+            Message = "Chat Room Topic to " ++ NewTopic,
+            global:send(ServerName,{Message, send_message_to_all_clients}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, NewTopic, AdminOnlyTopic)
+        end;
+    true -> ok
+    end.
+
+get_topic_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    global:send(ClientName, {ServerName, Topic, current_topic}),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+send_msg_server_to_all(Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    ClientsList = maps:keys(Clients),
+    lists:foreach(fun(ClientName) -> global:send(ClientName, {ServerName, Message, announcement}) end, ClientsList),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+send_msg_server_to_all_except_given(Message, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    ClientsList = maps:keys(Clients),
+    FilteredClients = lists:filter(fun(Name) -> Name =/= ClientName end, ClientsList),
+    lists:foreach(fun(Name) -> global:send(Name, {ServerName, Message, announcement}) end, FilteredClients),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+make_admin_server(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsClient == true ->
+        Client = maps:get(ClientName, Clients),
+        TempClient = maps:put(isAdmin, true, Client),
+        TempMap = maps:put(ClientName, TempClient, Clients),
+        io:format("\n[" ++ get_time() ++ "] ~p promoted to Admin~n", [ClientName]),
+        global:send(ClientName, {ServerName, "You are now an Admin", announcement}),
+        loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+    true ->
+        global:send(ServerName, {ServerName, "Client not Found. Failed to promote to Admin on the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
+
+get_admins_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    Admins = lists:filter(fun(Name) -> 
+        Client = maps:get(Name, Clients),
+        maps:get(isAdmin, Client)
+    end, maps:keys(Clients)),
+    global:send(ClientName, {ServerName, Admins, admin_list}),
+    loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+update_client_status(ClientName, Status, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsClient == true ->
+        Client = maps:get(ClientName, Clients),
+        TempClient1 = maps:put(status, Status, Client),
+        TempMap = maps:put(ClientName, TempClient1, Clients),
+        io:format("\n[" ++ get_time() ++ "] ~p is now ~p~n", [ClientName, Status]),
+        if Status =:= online ->
+            PersonalHistory = maps:get(personalHistory, TempClient1),
+            TempClient2 = maps:put(personalHistory, [], TempClient1),
+            TempMap2 = maps:put(ClientName, TempClient2, TempMap),
+            global:send(ClientName, {ServerName, PersonalHistory, offline_message_history}),
+            loop(ServerName, TempMap2, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true -> ok
         end,
-        State#state.clients
-    ),
-    {reply, ok, State#state{topic = Topic}}.
+        loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+    true -> ok
+    end.
 
-handle_cast(_, State) -> {noreply, State}.
+kick(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsAdminClient = maps:is_key(AdminName, Clients),
+    IsClient = maps:is_key(ClientName, Clients), 
+    if IsAdminClient == true andalso IsClient == true ->
+        Admin = maps:get(AdminName, Clients),
+        IsAdmin = maps:get(isAdmin, Admin),
+        if IsAdmin == true ->
+            TempMap = maps:remove(ClientName, Clients),
+            io:format("\n[" ++ get_time() ++ "] ~p kicked ~p from the chat~n", [AdminName, ClientName]),
+            global:send(ClientName, {ServerName, "You have been kicked from the server", announcement}),
+            loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true ->
+            global:send(AdminName, {ServerName, "You are not an Admin. Failed to kick client from the ", connection_failed}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+        end;
+    true ->
+        global:send(AdminName, {ServerName, "Client not found. Failed to kick client from the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
 
-handle_info(_, State) -> {noreply, State}.
+mute(AdminName, ClientName, Time, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsAdminClient = maps:is_key(AdminName, Clients),
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsAdminClient == true andalso IsClient == true ->
+        Admin = maps:get(AdminName, Clients),
+        IsAdmin = maps:get(isAdmin, Admin),
+        if IsAdmin == true ->
+            {{Year, Month, Day}, {Hour, Min, Sec}} = calendar:local_time(),
+            MuteEndTime = calendar:datetime_to_gregorian_seconds({{Year, Month, Day}, {Hour, Min, Sec}}) + Time * 60,
+            MuteEndDatetime = calendar:gregorian_seconds_to_datetime(MuteEndTime),
+            {{MuteYear, MuteMonth, MuteDay}, {MuteHour, MuteMin, MuteSec}} = MuteEndDatetime,
+            MuteTimeStr = lists:concat([MuteYear, "/", MuteMonth, "/", MuteDay, " ", MuteHour, ":", MuteMin, ":", MuteSec]),
+            Client = maps:get(ClientName, Clients),
+            MutedClient = maps:put(isMuted, true, maps:put(mutedTill, MuteEndDatetime, Client)),
+            TempMap = maps:put(ClientName, MutedClient, Clients),
+            io:format("\n[" ++ get_time() ++ "] ~p Muted ~p in the Group Till ~p~n", [AdminName, ClientName, MuteTimeStr]),
+            global:send(ClientName, {ServerName, "You have been muted until " ++ MuteTimeStr, announcement}),
+            timer:send_after(Time*60*1000, self(), {AdminName, ClientName, unmute_client}),
+            loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true ->
+            global:send(AdminName, {ServerName, "You are not an Admin. Failed to mute client on the ", connection_failed}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+        end;
+    true ->
+        global:send(AdminName, {ServerName, "Client not found. . Failed to mute client on the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
 
-terminate(_Reason, _State) -> ok.
+unmute(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsAdminClient = maps:is_key(AdminName, Clients),
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsAdminClient == true andalso IsClient == true ->
+        Admin = maps:get(AdminName, Clients),
+        IsAdmin = maps:get(isAdmin, Admin),
+        if IsAdmin == true ->
+            TempClient = maps:put(isMuted, false, maps:get(ClientName, Clients)),
+            TempMap = maps:put(ClientName, TempClient, Clients),
+            io:format("\n[" ++ get_time() ++ "] ~p unmuted ~p~n", [AdminName, ClientName]),
+            global:send(ClientName, {ServerName, "You have been unmuted", announcement}),
+            loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true ->
+            global:send(AdminName, {ServerName, "You are not an Admin. Failed to unmute client on the ", connection_failed}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+        end;
+    true ->
+        global:send(AdminName, {ServerName, "Client not found. Failed to unmute client on the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
 
-broadcast(State, Msg) ->
-    maps:foreach(fun(_, Pid) -> Pid ! {broadcast, Msg} end, State#state.clients).
+make_admin_client(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsAdminClient = maps:is_key(AdminName, Clients),
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsAdminClient == true andalso IsClient == true ->
+        Admin = maps:get(AdminName, Clients),
+        IsAdmin = maps:get(isAdmin, Admin),
+        if IsAdmin == true ->
+            TempClient = maps:put(isAdmin, true, maps:get(ClientName, Clients)),
+            TempMap = maps:put(ClientName, TempClient, Clients),
+            io:format("\n[" ++ get_time() ++ "] ~p promoted ~p to Admin~n", [AdminName, ClientName]),
+            global:send(ClientName, {ServerName, "You have been promoted to Admin", announcement}),
+            loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+        true ->
+            global:send(AdminName, {ServerName, "You are not an Admin. Failed to promote to Admin on the ", connection_failed}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+        end;
+    true ->
+        global:send(AdminName, {ServerName, "Client not found. Failed to promote to Admin on the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
+
+disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    IsClient = maps:is_key(ClientName, Clients),
+    if IsClient == true ->
+        TempMap = maps:remove(ClientName, Clients),
+        io:format("\n[" ++ get_time() ++ "] ~p disconnected from the server~n", [ClientName]),
+        Message = atom_to_list(ClientName) ++ " has left the chat",
+        global:send(ServerName, {Message, ClientName, send_message_to_all_clients_except_given}),
+        loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+    true ->
+        global:send(ClientName, {ServerName, "Client not found. Failed to disconnect from the ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+    end.
+
+get_time() ->
+  {{Year,Month,Day},{Hour,Min,Sec}} = erlang:localtime(),
+  Time = lists:concat([Year,'/',Month,'/',Day,' ',Hour,':',Min,':',Sec]),
+  Time.
+
+get_history(ServerName) ->
+  global:send(ServerName,{history}).
+
+get_connected_clients(ServerName) ->
+  global:send(ServerName, {get_connected_clients}).
+
+send_message_to_all_clients(ServerName, Msg) ->
+  global:send(ServerName, {Msg,send_message_to_all_clients}).
+
+make_admin(ServerName, ClientName) ->
+  global:send(ServerName, {ClientName, make_admin_server}).
