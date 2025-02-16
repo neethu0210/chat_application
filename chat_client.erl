@@ -1,6 +1,8 @@
 -module(chat_client).
 -export([start/2, send_message/3, disconnect/2, send_private_message/4, get_connected_clients/2, update_chat_topic/3, get_current_chat_topic/2, kick/3, mute/4, unmute/3, make_admin/3, get_admins/2, set_status/3, get_full_history/2, update_admin_only_topic_change/3]).
 
+-spec start(atom(), atom()) -> ok.
+
 start(ServerName, ClientName) ->
     ServerPid = global:whereis_name(ServerName),
     case ServerPid of
@@ -12,6 +14,8 @@ start(ServerName, ClientName) ->
             global:register_name(ClientName, ClientPid),
             ServerPid ! {ClientName, ClientPid, connect_client}
     end.
+
+-spec receives(atom()) -> no_return().
 
 receives(ClientName) ->
     receive
@@ -55,44 +59,72 @@ receives(ClientName) ->
             receives(ClientName)
     end.
 
+-spec send_message(atom(), atom(), string()) -> ok.
+
 send_message(ServerName, ClientName, Msg) ->
     global:send(ServerName, {ClientName, Msg, send_message}).
+
+-spec disconnect(atom(), atom()) -> ok.
 
 disconnect(ServerName, ClientName) ->
     global:send(ServerName, {ClientName, disconnect_client}).
 
+-spec send_private_message(atom(), atom(), atom(), string()) -> ok.
+
 send_private_message(ServerName, ClientName, ReceiverName, Msg) ->
     global:send(ServerName, {ClientName, ReceiverName, Msg, send_private_message}).
+
+-spec get_connected_clients(atom(), atom()) -> ok.
 
 get_connected_clients(ServerName, ClientName) ->
     global:send(ServerName, {ClientName, get_connected_clients_client}).
 
+-spec update_chat_topic(atom(), atom(), string()) -> ok.
+
 update_chat_topic(ServerName, ClientName, NewTopic) ->
     global:send(ServerName, {ClientName, NewTopic, update_topic}).
+
+-spec get_current_chat_topic(atom(), atom()) -> ok.
 
 get_current_chat_topic(ServerName, ClientName) ->
     global:send(ServerName, {ClientName, get_current_topic}).
 
+-spec kick(atom(), atom(), atom()) -> ok.
+
 kick(ServerName, AdminName, ClientName) ->
     global:send(ServerName, {AdminName, ClientName, kick_client}).
+
+-spec mute(atom(), atom(), atom(), pos_integer()) -> ok.
 
 mute(ServerName, AdminName, ClientName, Time) ->
     global:send(ServerName, {AdminName, ClientName, Time, mute_client}).
 
+-spec unmute(atom(), atom(), atom()) -> ok.
+
 unmute(ServerName, AdminName, ClientName) ->
     global:send(ServerName, {AdminName, ClientName, unmute_client}).
+
+-spec make_admin(atom(), atom(), atom()) -> ok.
 
 make_admin(ServerName, AdminName, ClientName) ->
     global:send(ServerName, {AdminName, ClientName, make_admin_client}).
 
+-spec get_admins(atom(), atom()) -> ok.
+
 get_admins(ServerName, ClientName) ->
     global:send(ServerName, {ClientName, get_admins}).
+
+-spec set_status(atom(), atom(), string()) -> ok.
 
 set_status(ServerName, ClientName, Status) ->
     global:send(ServerName, {ClientName, Status, update_status}).
 
+-spec get_full_history(atom(), atom()) -> ok.
+
 get_full_history(ServerName, ClientName) ->
     global:send(ServerName, {ClientName, history_client}).
+
+-spec update_admin_only_topic_change(atom(), atom(), boolean()) -> ok.
 
 update_admin_only_topic_change(ServerName, ClientName, EnableAdminOnly) ->
     global:send(ServerName, {ClientName, EnableAdminOnly, updt_admin_only_topic}).

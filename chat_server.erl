@@ -1,6 +1,8 @@
 -module(chat_server).
 -export([start/3, get_history/1, get_connected_clients/1, send_message_to_all_clients/2, make_admin/2]).
 
+-spec start(atom(), pos_integer(), pos_integer()) -> ok.
+
 start(ServerName, MaxClients, MaxHistoryCount) ->
   Clients = #{},
   MsgHistory = [],
@@ -9,6 +11,8 @@ start(ServerName, MaxClients, MaxHistoryCount) ->
   ServerPid = spawn(fun() -> loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) end),
   io:format("Server Started with PID ~p~n",[ServerPid]),
   global:register_name(ServerName,ServerPid).
+
+-spec loop(atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     receive
@@ -73,6 +77,8 @@ loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminO
             disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
+-spec connect(atom(), pid(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
+
 connect(ClientName, ClientPid, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     CurrentClients = map_size(Clients),
     IsClient = maps:is_key(ClientName, Clients),
@@ -93,6 +99,8 @@ connect(ClientName, ClientPid, ServerName, Clients, MaxClients, MaxHistoryCount,
             loop(ServerName, Temp, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
         end
     end.
+
+-spec send_msg_client(atom(), string(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> ok | no_return().
 
 send_msg_client(ClientName, Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients), 
@@ -124,8 +132,12 @@ send_msg_client(ClientName, Message, ServerName, Clients, MaxClients, MaxHistory
             global:send(ServerName, {Msg, ClientName, send_message_to_all_clients_except_given}),  
             loop(ServerName, Clients, MaxClients, MaxHistoryCount, TempHistory, Topic, AdminOnlyTopic)
         end;
-    true -> ok
+    true ->
+        global:send(ClientName, {ServerName, "Client Name not found. Cannot Send Message to Server ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec send_private_msg_client(atom(), atom(), string(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 send_private_msg_client(Sender, Receiver, Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClientSender = maps:is_key(Sender, Clients),
@@ -150,15 +162,21 @@ send_private_msg_client(Sender, Receiver, Message, ServerName, Clients, MaxClien
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
+-spec connected_clients(atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
+
 connected_clients(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     ClientsList = maps:keys(Clients),
     io:format("\n[" ++ get_time() ++ "] Clients Connected to Server :~p~n", [ClientsList]),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
 
+-spec connected_clients_client(atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
+
 connected_clients_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     ClientsList = maps:keys(Clients),
     global:send(ClientName, {ServerName, ClientsList, connected_clients}),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+-spec msg_history(atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 msg_history(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     DisplayHistory = lists:reverse(MsgHistory),
@@ -168,13 +186,19 @@ msg_history(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic,
     io:format("~p ~p: ~p~n",[Time, From, Message]) end, DisplayHistory),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
 
+-spec msg_history_client(atom(), atom(),map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> ok | no_return().
+
 msg_history_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients),
     if IsClient == true ->
         global:send(ClientName, {ServerName, MsgHistory, full_history}),
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
-    true -> ok
+    true -> 
+        global:send(ClientName, {ServerName, "Client Name not found. Cannot get History of the Messages on the Server ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec update_admin_only_topic(atom(), boolean(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> ok | no_return().
 
 update_admin_only_topic(ClientName, EnableAdminOnly, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients),
@@ -196,8 +220,12 @@ update_admin_only_topic(ClientName, EnableAdminOnly, ServerName, Clients, MaxCli
                 global:send(ClientName, {ServerName, "You are Not Admin. Only admins can change the admin-only topic setting of the .", connection_failed}),
                 loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
             end;
-        true -> ok
+        true -> 
+            global:send(ClientName, {ServerName, "Client Name not found. Cannot Update the Admin-only topic change switch on the Server ", connection_failed}),
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec update_topic_client(atom(), string(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> ok | no_return().
 
 update_topic_client(ClientName, NewTopic, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients), 
@@ -208,37 +236,47 @@ update_topic_client(ClientName, NewTopic, ServerName, Clients, MaxClients, MaxHi
             if IsAdmin == true ->
                 io:format("\n[" ++ get_time() ++ "] "),
                 io:format("~p Updated the Chat Room Topic changed to ~p~n",[ClientName, NewTopic]),
-                Message = "Chat Room Topic to " ++ NewTopic,
+                Message = "Chat Room Topic changed to " ++ NewTopic,
                 global:send(ServerName,{Message, send_message_to_all_clients}),
                 loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, NewTopic, AdminOnlyTopic);
             true ->
-                global:send(ClientName, {ServerName, "You are Not Admin. Only Admin Can Change the Topic. Failed to change the Topic of the ", connection_failed}),
+                global:send(ClientName, {ServerName, "You are Not Admin. Only Admin Can Change the Topic. Failed to change the Chat Topic on the Server ", connection_failed}),
                 loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
             end;
         true ->
             io:format("\n[" ++ get_time() ++ "] "),
             io:format("~p Updated the Chat Room Topic to ~p~n",[ClientName, NewTopic]),
-            Message = "Chat Room Topic to " ++ NewTopic,
+            Message = "Chat Room Topic changed to " ++ NewTopic,
             global:send(ServerName,{Message, send_message_to_all_clients}),
             loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, NewTopic, AdminOnlyTopic)
         end;
-    true -> ok
+    true -> 
+        global:send(ClientName, {ServerName, "Client Name not found. Cannot Update the Chat Topic on the Server ", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec get_topic_client(atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 get_topic_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     global:send(ClientName, {ServerName, Topic, current_topic}),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+-spec send_msg_server_to_all(string(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 send_msg_server_to_all(Message, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     ClientsList = maps:keys(Clients),
     lists:foreach(fun(ClientName) -> global:send(ClientName, {ServerName, Message, announcement}) end, ClientsList),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
 
+-spec send_msg_server_to_all_except_given(string(), atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
+
 send_msg_server_to_all_except_given(Message, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     ClientsList = maps:keys(Clients),
     FilteredClients = lists:filter(fun(Name) -> Name =/= ClientName end, ClientsList),
     lists:foreach(fun(Name) -> global:send(Name, {ServerName, Message, announcement}) end, FilteredClients),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+-spec make_admin_server(atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 make_admin_server(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients),
@@ -250,9 +288,11 @@ make_admin_server(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, 
         global:send(ClientName, {ServerName, "You are now an Admin", announcement}),
         loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
     true ->
-        global:send(ServerName, {ServerName, "Client not Found. Failed to promote to Admin on the ", connection_failed}),
+        global:send(ServerName, {ServerName, "Client not Found. Failed to promote to Admin on the Server ", connection_failed}),
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec get_admins_client(atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 get_admins_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     Admins = lists:filter(fun(Name) -> 
@@ -261,6 +301,8 @@ get_admins_client(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, 
     end, maps:keys(Clients)),
     global:send(ClientName, {ServerName, Admins, admin_list}),
     loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic).
+
+-spec update_client_status(atom(), atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 update_client_status(ClientName, Status, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients),
@@ -278,8 +320,12 @@ update_client_status(ClientName, Status, ServerName, Clients, MaxClients, MaxHis
         true -> ok
         end,
         loop(ServerName, TempMap, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
-    true -> ok
+    true -> 
+        global:send(ClientName, {ServerName, "Cannot Update the Client Status. Client Name not found on the Server .", connection_failed}),
+        loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec kick(atom(), atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 kick(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsAdminClient = maps:is_key(AdminName, Clients),
@@ -300,6 +346,8 @@ kick(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, Ms
         global:send(AdminName, {ServerName, "Client not found. Failed to kick client from the ", connection_failed}),
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec mute(atom(), atom(), integer(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 mute(AdminName, ClientName, Time, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsAdminClient = maps:is_key(AdminName, Clients),
@@ -329,6 +377,8 @@ mute(AdminName, ClientName, Time, ServerName, Clients, MaxClients, MaxHistoryCou
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
+-spec unmute(atom(), atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
+
 unmute(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsAdminClient = maps:is_key(AdminName, Clients),
     IsClient = maps:is_key(ClientName, Clients),
@@ -349,6 +399,8 @@ unmute(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, 
         global:send(AdminName, {ServerName, "Client not found. Failed to unmute client on the ", connection_failed}),
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
+
+-spec make_admin_client(atom(), atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
 
 make_admin_client(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsAdminClient = maps:is_key(AdminName, Clients),
@@ -371,6 +423,8 @@ make_admin_client(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHis
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
+-spec disconnect(atom(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
+
 disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
     IsClient = maps:is_key(ClientName, Clients),
     if IsClient == true ->
@@ -384,19 +438,29 @@ disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHist
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
+-spec get_time() -> string().
+
 get_time() ->
   {{Year,Month,Day},{Hour,Min,Sec}} = erlang:localtime(),
   Time = lists:concat([Year,'/',Month,'/',Day,' ',Hour,':',Min,':',Sec]),
   Time.
 
+-spec get_history(atom()) -> ok.
+
 get_history(ServerName) ->
   global:send(ServerName,{history}).
+
+-spec get_connected_clients(atom()) -> ok.
 
 get_connected_clients(ServerName) ->
   global:send(ServerName, {get_connected_clients}).
 
+-spec send_message_to_all_clients(atom(), string()) -> ok.
+
 send_message_to_all_clients(ServerName, Msg) ->
   global:send(ServerName, {Msg,send_message_to_all_clients}).
+
+-spec make_admin(atom(), atom()) -> ok.
 
 make_admin(ServerName, ClientName) ->
   global:send(ServerName, {ClientName, make_admin_server}).
