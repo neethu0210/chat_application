@@ -1,5 +1,5 @@
 -module(chat_server).
--export([start/3, get_history/1, get_connected_clients/1, send_message_to_all_clients/2, make_admin/2]).
+-export([start/3, get_history/1, get_connected_clients/1, send_message_to_all_clients/2, make_admin/2, get_details/1]).
 
 -spec start(atom(), pos_integer(), pos_integer()) -> ok.
 
@@ -74,7 +74,12 @@ loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminO
             make_admin_client(AdminName, ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
             
         {ClientName, disconnect_client} ->
-            disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
+            disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic);
+
+        {get_details, Caller} ->
+            Details = get_server_details(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic),
+            Caller ! {ServerName, Details},
+            loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
 -spec connect(atom(), pid(), atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> no_return().
@@ -438,6 +443,24 @@ disconnect(ClientName, ServerName, Clients, MaxClients, MaxHistoryCount, MsgHist
         loop(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic)
     end.
 
+-spec get_server_details(atom(), map(), pos_integer(), pos_integer(), list(), string(), boolean()) -> map().
+
+get_server_details(ServerName, Clients, MaxClients, MaxHistoryCount, MsgHistory, Topic, AdminOnlyTopic) ->
+    #{
+        server_name => ServerName,
+        max_clients => MaxClients,
+        max_history_count => MaxHistoryCount,
+        topic => #{name => Topic, admin_only => AdminOnlyTopic},
+        clients => maps:map(fun(_, ClientData) ->
+            #{ pid => maps:get(clientPid, ClientData),
+               is_admin => maps:get(isAdmin, ClientData),
+               is_muted => maps:get(isMuted, ClientData),
+               status => maps:get(status, ClientData),
+               personal_history => maps:get(personalHistory, ClientData) }
+        end, Clients),
+        message_history => lists:reverse(MsgHistory)
+    }.
+
 -spec get_time() -> string().
 
 get_time() ->
@@ -458,9 +481,19 @@ get_connected_clients(ServerName) ->
 -spec send_message_to_all_clients(atom(), string()) -> ok.
 
 send_message_to_all_clients(ServerName, Msg) ->
-  global:send(ServerName, {Msg,send_message_to_all_clients}).
+  global:send(ServerName, {Msg, send_message_to_all_clients}).
 
 -spec make_admin(atom(), atom()) -> ok.
 
 make_admin(ServerName, ClientName) ->
   global:send(ServerName, {ClientName, make_admin_server}).
+
+-spec get_details(atom()) -> map() | {error, string()}.
+
+get_details(ServerName) ->
+    Caller = self(),
+    global:send(ServerName, {get_details, Caller}),
+    receive
+        {ServerName, Details} -> Details
+    after 2000 -> {error, "Server did not respond in time"}
+    end.
