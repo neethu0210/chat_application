@@ -39,5 +39,5 @@ This is a simple chat application implemented in Erlang, consisting of a **serve
 
 #### c) Offline Messaging
 - **Private Message Storage**: If a recipient is offline, the server stores the message.
-- **Delayed Delivery**: When the recipient reconnects, they receive stored messages.
+- **Delayed Delivery**: Deliver the stored messages when the recipient comes online.
 - **Sender Notification**: The sender is notified if the recipient is offline and will receive the message later.
