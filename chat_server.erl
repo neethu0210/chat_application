@@ -1,5 +1,5 @@
 -module(chat_server).
--export([start/3, get_history/1, get_connected_clients/1, send_message_to_all_clients/2, make_admin/2, get_details/1]).
+-export([start/3, get_history/1, get_connected_clients/1, make_admin/2, get_details/1]).
 
 -spec start(atom(), pos_integer(), pos_integer()) -> ok.
 
@@ -477,11 +477,6 @@ get_history(ServerName) ->
 
 get_connected_clients(ServerName) ->
   global:send(ServerName, {get_connected_clients}).
-
--spec send_message_to_all_clients(atom(), string()) -> ok.
-
-send_message_to_all_clients(ServerName, Msg) ->
-  global:send(ServerName, {Msg, send_message_to_all_clients}).
 
 -spec make_admin(atom(), atom()) -> ok.
 

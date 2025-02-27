@@ -1,0 +1,196 @@
+-module(chat_client_test).
+-include_lib("eunit/include/eunit.hrl").
+
+setup() ->
+    ServerName = test_chat_server,
+    MaxClients = 3,
+    MaxHistoryCount = 5,
+    chat_server:start(ServerName, MaxClients, MaxHistoryCount),
+    ClientName = test_client,
+    ClientPid = spawn(fun() -> receive after infinity -> ok end end),
+    global:register_name(ClientName, ClientPid),
+    {ok, {ServerName, ClientName}}.
+
+teardown(ServerName) ->
+    Pid = global:whereis_name(ServerName),
+    if
+        Pid =/= undefined -> exit(Pid, kill);
+        true -> ok
+    end,
+    ok.
+
+start_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    Details = chat_server:get_details(ServerName),
+    Clients = maps:get(clients, Details),
+    ?assert(maps:is_key(ClientName, Clients)).
+
+send_message_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:send_message(ServerName, ClientName, "Hello"),
+    Details = chat_server:get_details(ServerName),
+    Messages = maps:get(message_history, Details),
+    ?assert(lists:any(fun({_, From, Msg}) -> From == ClientName andalso Msg == "Hello" end, Messages)).
+
+send_private_message_test(ServerName) ->
+    Sender = sender_client,
+    ReceiverOnline = receiver_online,
+    ReceiverOffline = receiver_offline,
+
+    SenderPid = spawn(fun() -> receive after infinity -> ok end end),
+    global:register_name(Sender, SenderPid),
+    chat_client:start(ServerName, Sender),
+
+    ReceiverOnlinePid = spawn(fun() -> receive after infinity -> ok end end),
+    global:register_name(ReceiverOnline, ReceiverOnlinePid),
+    chat_client:start(ServerName, ReceiverOnline),
+    chat_client:set_status(ServerName, ReceiverOnline, "online"),
+
+    chat_client:send_private_message(ServerName, Sender, ReceiverOnline, "Hello Online"),
+    DetailsOnline = chat_server:get_details(ServerName),
+    ClientsOnline = maps:get(clients, DetailsOnline),
+    ReceiverOnlineData = maps:get(ReceiverOnline, ClientsOnline),
+    PersonalHistoryOnline = maps:get(personalHistory, ReceiverOnlineData),
+    ?assertNot(lists:any(fun({_, From, Msg}) -> From == Sender andalso Msg == "Hello Online" end, PersonalHistoryOnline)),
+
+    ReceiverOfflinePid = spawn(fun() -> receive after infinity -> ok end end),
+    global:register_name(ReceiverOffline, ReceiverOfflinePid),
+    chat_client:start(ServerName, ReceiverOffline),
+    chat_client:set_status(ServerName, ReceiverOffline, "offline"),
+
+    chat_client:send_private_message(ServerName, Sender, ReceiverOffline, "Hello Offline"),
+    DetailsOffline = chat_server:get_details(ServerName),
+    ClientsOffline = maps:get(clients, DetailsOffline),
+    ReceiverOfflineData = maps:get(ReceiverOffline, ClientsOffline),
+    PersonalHistoryOffline = maps:get(personalHistory, ReceiverOfflineData),
+    ?assert(lists:any(fun({_, From, Msg}) -> From == Sender andalso Msg == "Hello Offline" end, PersonalHistoryOffline)).
+
+disconnect_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:disconnect(ServerName, ClientName),
+    Details = chat_server:get_details(ServerName),
+    Clients = maps:get(clients, Details),
+    ?assertNot(maps:is_key(ClientName, Clients)).
+
+get_connected_clients_test(ServerName, ClientName) ->
+    ClientName1 = test_client1,
+    ClientPid1 = spawn(fun() -> receive after infinity -> ok end end),
+    global:register_name(ClientName1, ClientPid1),
+    chat_client:start(ServerName, ClientName),
+    chat_client:start(ServerName, ClientName1),
+    chat_client:get_connected_clients(ServerName, ClientName),
+    Details = chat_server:get_details(ServerName),
+    Clients = maps:get(clients, Details),
+    ?assert(maps:is_key(ClientName, Clients) andalso maps:is_key(ClientName1, Clients)).
+
+update_chat_topic_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:update_chat_topic(ServerName, ClientName, "New Topic"),
+    Details = chat_server:get_details(ServerName),
+    Topic = maps:get(chat_topic, Details),
+    ?assert(Topic == "New Topic").
+
+get_current_chat_topic_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:update_chat_topic(ServerName, ClientName, "Erlang Chat"),
+    chat_client:get_current_chat_topic(ServerName, ClientName),
+    Details = chat_server:get_details(ServerName),
+    Topic = maps:get(chat_topic, Details),
+    ?assert(Topic == "Erlang Chat").
+
+kick_test(ServerName) ->
+    Admin = admin_client,
+    Client = client_to_kick,
+    chat_client:start(ServerName, Admin),
+    chat_client:start(ServerName, Client),
+    chat_client:make_admin(ServerName, Admin, Admin),
+    chat_client:kick(ServerName, Admin, Client),
+    Details = chat_server:get_details(ServerName),
+    Clients = maps:get(clients, Details),
+    ?assertNot(maps:is_key(Client, Clients)).
+
+mute_test(ServerName) ->
+    Admin = admin_client,
+    Client = client_to_mute,
+    chat_client:start(ServerName, Admin),
+    chat_client:start(ServerName, Client),
+    chat_client:make_admin(ServerName, Admin, Admin),
+    chat_client:mute(ServerName, Admin, Client, 10),
+    Details = chat_server:get_details(ServerName),
+    Muted = maps:get(muted_clients, Details),
+    ?assert(maps:is_key(Client, Muted)).
+
+unmute_test(ServerName) ->
+    Admin = admin_client,
+    Client = client_to_unmute,
+    chat_client:start(ServerName, Admin),
+    chat_client:start(ServerName, Client),
+    chat_client:make_admin(ServerName, Admin, Admin),
+    chat_client:mute(ServerName, Admin, Client, 10),
+    chat_client:unmute(ServerName, Admin, Client),
+    Details = chat_server:get_details(ServerName),
+    Muted = maps:get(muted_clients, Details),
+    ?assertNot(maps:is_key(Client, Muted)).
+
+make_admin_test(ServerName) ->
+    Admin = admin_client,
+    NewAdmin = client_to_promote,
+    chat_client:start(ServerName, Admin),
+    chat_client:start(ServerName, NewAdmin),
+    chat_client:make_admin(ServerName, Admin, NewAdmin),
+    Details = chat_server:get_details(ServerName),
+    Admins = maps:get(admins, Details),
+    ?assert(lists:member(NewAdmin, Admins)).
+
+get_admins_test(ServerName, ClientName) ->
+    Admin = admin_client,
+    chat_client:start(ServerName, Admin),
+    chat_client:get_admins(ServerName, ClientName),
+    Details = chat_server:get_details(ServerName),
+    Admins = maps:get(admins, Details),
+    ?assert(lists:member(Admin, Admins)).
+
+set_status_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:set_status(ServerName, ClientName, "Offline"),
+    Details = chat_server:get_details(ServerName),
+    Clients = maps:get(clients, Details),
+    Status = maps:get(status, maps:get(ClientName, Clients)),
+    ?assert(Status == "Offline").
+
+get_full_history_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:send_message(ServerName, ClientName, "Test Message"),
+    chat_client:get_full_history(ServerName, ClientName),
+    Details = chat_server:get_details(ServerName),
+    Messages = maps:get(message_history, Details),
+    ?assert(lists:any(fun({_, From, Msg}) -> From == ClientName andalso Msg == "Test Message" end, Messages)).
+
+update_admin_only_topic_change_test(ServerName, ClientName) ->
+    chat_client:start(ServerName, ClientName),
+    chat_client:update_admin_only_topic_change(ServerName, ClientName, true),
+    Details = chat_server:get_details(ServerName),
+    AdminOnly = maps:get(admin_only_topic_change, Details),
+    ?assert(AdminOnly == true).
+
+instantiator({ok, {ServerName, ClientName}}) ->
+    [
+        fun() -> start_test(ServerName, ClientName) end,
+        fun() -> send_message_test(ServerName, ClientName) end,
+        fun() -> send_private_message_test(ServerName) end,
+        fun() -> disconnect_test(ServerName, ClientName) end,
+        fun() -> get_connected_clients_test(ServerName, ClientName) end,
+        fun() -> update_chat_topic_test(ServerName, ClientName) end,
+        fun() -> get_current_chat_topic_test(ServerName, ClientName) end,
+        fun() -> kick_test(ServerName) end,
+        fun() -> mute_test(ServerName) end,
+        fun() -> unmute_test(ServerName) end,
+        fun() -> make_admin_test(ServerName) end,
+        fun() -> get_admins_test(ServerName, ClientName) end,
+        fun() -> set_status_test(ServerName, ClientName) end,
+        fun() -> get_full_history_test(ServerName, ClientName) end,
+        fun() -> update_admin_only_topic_change_test(ServerName, ClientName) end
+    ].
+
+all_test_() ->
+    {setup, fun setup/0, fun teardown/1, fun instantiator/1}.
